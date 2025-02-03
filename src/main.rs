@@ -38,17 +38,29 @@ fn sdl() {
 struct Memory {
     data: [u8; 4096],
 }
+impl Memory {
+    pub fn new() -> Memory {
+        Memory { data: [0; 4096] }
+    }
+
+    fn get_instruction(&self, program_counter: usize) -> String {
+        let v0 = self.data[program_counter];
+        let v1 = self.data[program_counter + 1];
+        format!("{:02X}", v0) + format!("{:02X}", v1).as_str()
+    }
+}
 
 fn main() {
     let mut data = Vec::new();
     let mut file = fs::File::open("data/1-chip8-logo.ch8").unwrap();
-    let mut memory = Memory { data: [0; 4096] };
+    let mut memory = Memory::new();
 
     file.read_to_end(&mut data).unwrap();
     memory.data[512..512 + data.len()].copy_from_slice(&data[..]);
     let start = 512;
     let end = start + data.len();
-    for i in start..end {
-        print!("{} ", memory.data[i]);
+
+    for i in (start..end).step_by(2) {
+        println!("{}", memory.get_instruction(i));
     }
 }
