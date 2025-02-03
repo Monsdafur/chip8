@@ -35,11 +35,20 @@ fn sdl() {
     }
 }
 
+struct Memory {
+    data: [u8; 4096],
+}
+
 fn main() {
     let mut data = Vec::new();
     let mut file = fs::File::open("data/1-chip8-logo.ch8").unwrap();
+    let mut memory = Memory { data: [0; 4096] };
 
     file.read_to_end(&mut data).unwrap();
-
-    println!("{:?}", data);
+    memory.data[512..512 + data.len()].copy_from_slice(&data[..]);
+    let start = 512;
+    let end = start + data.len();
+    for i in start..end {
+        print!("{} ", memory.data[i]);
+    }
 }
