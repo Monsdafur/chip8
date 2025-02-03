@@ -1,8 +1,10 @@
+use std::fs;
+use std::io::Read;
 use std::time::Duration;
 
 use sdl3::{event::Event, pixels::Color, render::FRect};
 
-fn main() {
+fn sdl() {
     let sdl_context = sdl3::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
@@ -14,6 +16,7 @@ fn main() {
     canvas.present();
     let mut event_pump = sdl_context.event_pump().unwrap();
     let rect = FRect::new(380.0, 280.0, 40.0, 40.0);
+
     'running: loop {
         for event in event_pump.poll_iter() {
             match event {
@@ -30,4 +33,13 @@ fn main() {
         canvas.present();
         std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
+}
+
+fn main() {
+    let mut data = Vec::new();
+    let mut file = fs::File::open("data/1-chip8-logo.ch8").unwrap();
+
+    file.read_to_end(&mut data).unwrap();
+
+    println!("{:?}", data);
 }
