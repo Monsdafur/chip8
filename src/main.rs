@@ -1,17 +1,17 @@
-use std::fs;
+use clap::Parser;
 use std::io::Read;
 use std::time::Duration;
+use std::{fs, path::PathBuf};
 
 use sdl3::{
-    event::Event,
-    keyboard::Keycode,
-    pixels::Color,
-    rect::Rect,
-    render::{Canvas, FRect},
-    video::Window,
+    event::Event, keyboard::Keycode, pixels::Color, rect::Point, render::Canvas, video::Window,
 };
 
 fn main() {
+    let args = Cli::parse();
+    let mut chip8 = Chip8::new();
+    chip8.load(args.path);
+
     let sdl_context = sdl3::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
@@ -19,11 +19,6 @@ fn main() {
 
     let mut canvas = window.into_canvas();
     let mut event_pump = sdl_context.event_pump().unwrap();
-
-    let mut chip8 = Chip8::new(1);
-    let file_path = String::from("data/1-chip8-logo.ch8");
-    chip8.load(file_path);
-
     canvas.set_scale(20.0, 20.0).unwrap();
 
     'running: loop {
@@ -45,11 +40,17 @@ fn main() {
     }
 }
 
+#[derive(Parser)]
+struct Cli {
+    path: PathBuf,
+}
+
 #[derive(Debug)]
 enum Opcode {
     Clear,
     NormalRegistry { x: u8, n0: u8, n1: u8 },
     IndexRegistry { n0: u8, n1: u8, n2: u8 },
+    AddRegistry { x: u8, n0: u8, n1: u8 },
     Jump { n0: u8, n1: u8, n2: u8 },
     Draw { x: u8, y: u8, n: u8 },
 }
@@ -72,12 +73,11 @@ struct Chip8 {
     start: usize,
     end: usize,
     program_counter: usize,
-    render_scale: u8,
-    pixels: Vec<FRect>,
+    pixels: Vec<Point>,
 }
 
 impl Chip8 {
-    fn new(render_scale: u8) -> Chip8 {
+    fn new() -> Chip8 {
         Chip8 {
             data: [0; 4096],
             v: [0; 16],
@@ -85,12 +85,11 @@ impl Chip8 {
             start: 512,
             end: 512,
             program_counter: 512,
-            render_scale: render_scale,
             pixels: Vec::new(),
         }
     }
 
-    fn load(&mut self, file_path: String) {
+    fn load(&mut self, file_path: PathBuf) {
         let mut data = Vec::new();
         let mut file = fs::File::open(file_path).unwrap();
 
@@ -114,24 +113,35 @@ impl Chip8 {
         if c00 == 0 {
             Opcode::Clear
         } else if c00 == 6 {
+            // 00E0
             Opcode::NormalRegistry {
                 x: c01,
                 n0: c10,
                 n1: c11,
             }
         } else if c00 == 10 {
+            // ANNN
             Opcode::IndexRegistry {
                 n0: c01,
                 n1: c10,
                 n2: c11,
             }
+        } else if c00 == 7 {
+            // 7XNN
+            Opcode::AddRegistry {
+                x: c01,
+                n0: c10,
+                n1: c11,
+            }
         } else if c00 == 13 {
+            // DXYN
             Opcode::Draw {
                 x: c01,
                 y: c10,
                 n: c11,
             }
         } else if c00 == 1 {
+            // 1NNN
             Opcode::Jump {
                 n0: c01,
                 n1: c10,
@@ -161,6 +171,10 @@ impl Chip8 {
         self.i = Chip8::to_decimal(n0, n1, n2);
     }
 
+    fn add_registry(&mut self, x: u8, n0: u8, n1: u8) {
+        self.v[x as usize] += Chip8::to_decimal(0, n0, n1) as u8;
+    }
+
     fn draw(&mut self, x: u8, y: u8, n: u8) {
         let px = self.v[x as usize];
         let py = self.v[y as usize];
@@ -178,12 +192,7 @@ impl Chip8 {
     }
 
     fn draw_pixel(&mut self, x: u8, y: u8) {
-        let pixel = FRect::new(
-            x as f32 * self.render_scale as f32,
-            y as f32 * self.render_scale as f32,
-            self.render_scale as f32,
-            self.render_scale as f32,
-        );
+        let pixel = Point::new(x as i32, y as i32);
         self.pixels.push(pixel);
     }
 
@@ -203,6 +212,10 @@ impl Chip8 {
                 self.set_index_registry(n0, n1, n2);
                 self.program_counter += 2;
             }
+            Opcode::AddRegistry { x, n0, n1 } => {
+                self.add_registry(x, n0, n1);
+                self.program_counter += 2;
+            }
             Opcode::Jump { n0, n1, n2 } => {
                 self.jump(n0, n1, n2);
             }
@@ -218,7 +231,7 @@ impl Chip8 {
         canvas.clear();
         canvas.set_draw_color(Color::RGB(0, 175, 0));
         for pixel in self.pixels.iter() {
-            canvas.draw_rect(*pixel).unwrap();
+            canvas.draw_point(*pixel).unwrap();
         }
         canvas.present();
     }
