@@ -314,13 +314,13 @@ impl Chip8 {
     }
 
     fn shift_left(&mut self, x: u8, y: u8) {
-        self.v[15] = self.v[x as usize] & 0b10000000;
-        self.v[x as usize] = self.v[y as usize] >> 1;
+        self.v[15] = (self.v[x as usize] & 0b10000000) >> 7;
+        self.v[x as usize] = self.v[y as usize] << 1;
     }
 
     fn shift_right(&mut self, x: u8, y: u8) {
         self.v[15] = self.v[x as usize] & 0b1;
-        self.v[x as usize] = self.v[y as usize] << 1;
+        self.v[x as usize] = self.v[y as usize] >> 1;
     }
 
     fn draw(&mut self, x: u8, y: u8, n: u8) {
@@ -329,11 +329,12 @@ impl Chip8 {
 
         for oy in 0..n {
             let idx = oy as usize + self.i as usize;
-            let row = String::from(format!("{:08b} ", self.data[idx]).trim());
+            let mut bit_row = self.data[idx];
             for ox in 0..8 {
-                let c = row.as_bytes()[ox];
-                if c as u8 == 49 {
-                    self.draw_pixel(px + ox as u8, py + oy);
+                let bit = bit_row & 0b1;
+                bit_row >>= 1;
+                if bit > 0 {
+                    self.draw_pixel(px + (8 - ox), py + oy);
                 }
             }
         }
