@@ -45,7 +45,6 @@ struct Cli {
     path: PathBuf,
 }
 
-#[derive(Debug)]
 enum Opcode {
     Clear,
     Return,
@@ -72,6 +71,8 @@ enum Opcode {
     ShiftRight { x: u8, y: u8 },
 
     Draw { x: u8, y: u8, n: u8 },
+
+    None { raw: RawOpCode },
 }
 
 struct RawOpCode {
@@ -129,112 +130,90 @@ impl Chip8 {
     }
 
     fn decode(raw_opcode: RawOpCode) -> Opcode {
-        let c00 = raw_opcode.v0 / 16;
-        let c01 = raw_opcode.v0 % 16;
-        let c10 = raw_opcode.v1 / 16;
-        let c11 = raw_opcode.v1 % 16;
+        let c0 = raw_opcode.v0 >> 4;
+        let c1 = raw_opcode.v0 & 0b1111;
+        let c2 = raw_opcode.v1 >> 4;
+        let c3 = raw_opcode.v1 & 0b1111;
 
-        if c00 == 0 {
-            if c11 == 0 {
-                // 00E0
-                Opcode::Clear
-            } else {
-                // 00EE
-                Opcode::Return
-            }
-        } else if c00 == 6 {
-            // 6XNN
-            Opcode::NormalRegistry {
-                x: c01,
-                n0: c10,
-                n1: c11,
-            }
-        } else if c00 == 10 {
-            // ANNN
-            Opcode::IndexRegistry {
-                n0: c01,
-                n1: c10,
-                n2: c11,
-            }
-        } else if c00 == 7 {
-            // 7XNN
-            Opcode::AddRegistry {
-                x: c01,
-                n0: c10,
-                n1: c11,
-            }
-        } else if c00 == 3 {
-            // 3XNN
-            Opcode::SkipIfEqualXN {
-                x: c01,
-                n0: c10,
-                n1: c11,
-            }
-        } else if c00 == 4 {
-            // 4XNN
-            Opcode::SkipIfNotEqualXN {
-                x: c01,
-                n0: c10,
-                n1: c11,
-            }
-        } else if c00 == 5 {
-            // 5XY0
-            Opcode::SkipIfEqualXY { x: c01, y: c10 }
-        } else if c00 == 9 {
-            // 9XY0
-            Opcode::SkipIfNotEqualXY { x: c01, y: c10 }
-        } else if c00 == 1 {
-            // 1NNN
-            Opcode::Jump {
-                n0: c01,
-                n1: c10,
-                n2: c11,
-            }
-        } else if c00 == 2 {
-            // 2NNN
-            Opcode::Subroutine {
-                n0: c01,
-                n1: c10,
-                n2: c11,
-            }
-        } else if c00 == 8 {
-            if c11 == 0 {
-                // 8XY0
-                Opcode::Set { x: c01, y: c10 }
-            } else if c11 == 1 {
-                // 8XY1
-                Opcode::Or { x: c01, y: c10 }
-            } else if c11 == 2 {
-                // 8XY2
-                Opcode::And { x: c01, y: c10 }
-            } else if c11 == 3 {
-                // 8XY3
-                Opcode::Xor { x: c01, y: c10 }
-            } else if c11 == 4 {
-                // 8XY4
-                Opcode::Increment { x: c01, y: c10 }
-            } else if c11 == 5 {
-                // 8XY5
-                Opcode::Decrement { x: c01, y: c10 }
-            } else if c11 == 7 {
-                // 8XY7
-                Opcode::DecrementRev { x: c01, y: c10 }
-            } else if c11 == 6 {
-                // 8XY6
-                Opcode::ShiftRight { x: c01, y: c10 }
-            } else {
-                // 8XYE
-                Opcode::ShiftLeft { x: c01, y: c10 }
-            }
-        } else if c00 == 13 {
-            // DXYN
-            Opcode::Draw {
-                x: c01,
-                y: c10,
-                n: c11,
-            }
-        } else {
-            unimplemented!("opcode: {}", raw_opcode.as_string());
+        match c0 {
+            0x0 => match c3 {
+                0x0 => Opcode::Clear, // 00E0
+                _ => Opcode::Return,  // 00EE
+            },
+
+            0x6 => Opcode::NormalRegistry {
+                x: c1,
+                n0: c2,
+                n1: c3,
+            }, // 6XNN
+
+            0xA => Opcode::IndexRegistry {
+                n0: c1,
+                n1: c2,
+                n2: c3,
+            }, // ANNN
+
+            0x7 => Opcode::AddRegistry {
+                x: c1,
+                n0: c2,
+                n1: c3,
+            }, // 7XNN
+
+            0x3 => Opcode::SkipIfEqualXN {
+                x: c1,
+                n0: c2,
+                n1: c3,
+            }, // 3XNN
+
+            0x4 => Opcode::SkipIfNotEqualXN {
+                x: c1,
+                n0: c2,
+                n1: c3,
+            }, // 4XNN
+
+            0x5 => Opcode::SkipIfEqualXY { x: c1, y: c2 }, // 5XY0
+
+            0x9 => Opcode::SkipIfNotEqualXY { x: c1, y: c2 }, // 9XY0
+
+            0x1 => Opcode::Jump {
+                n0: c1,
+                n1: c2,
+                n2: c3,
+            }, // 1NNN
+
+            0x2 => Opcode::Subroutine {
+                n0: c1,
+                n1: c2,
+                n2: c3,
+            }, // 2NNN
+
+            0x8 => match c3 {
+                0x0 => Opcode::Set { x: c1, y: c2 }, // 8XY0
+
+                0x1 => Opcode::Or { x: c1, y: c2 }, // 8XY1
+
+                0x2 => Opcode::And { x: c1, y: c2 }, // 8XY2
+
+                0x3 => Opcode::Xor { x: c1, y: c2 }, // 8XY3
+
+                0x4 => Opcode::Increment { x: c1, y: c2 }, // 8XY4
+
+                0x5 => Opcode::Decrement { x: c1, y: c2 }, // 8XY5
+
+                0x7 => Opcode::DecrementRev { x: c1, y: c2 }, // 8XY7
+
+                0x6 => Opcode::ShiftRight { x: c1, y: c2 }, // 8XY6
+
+                _ => Opcode::ShiftLeft { x: c1, y: c2 }, // 8XYE
+            },
+
+            0xD => Opcode::Draw {
+                x: c1,
+                y: c2,
+                n: c3,
+            }, // DXYN
+
+            _ => Opcode::None { raw: raw_opcode },
         }
     }
 
@@ -330,11 +309,11 @@ impl Chip8 {
         for oy in 0..n {
             let idx = oy as usize + self.i as usize;
             let mut bit_row = self.data[idx];
-            for ox in 0..8 {
+            for ox in (0..8).rev() {
                 let bit = bit_row & 0b1;
                 bit_row >>= 1;
                 if bit > 0 {
-                    self.draw_pixel(px + (8 - ox), py + oy);
+                    self.draw_pixel(px + ox, py + oy);
                 }
             }
         }
@@ -432,6 +411,9 @@ impl Chip8 {
             Opcode::Draw { x, y, n } => {
                 self.draw(x, y, n);
                 self.step_counter();
+            }
+            Opcode::None { raw } => {
+                unimplemented!("opcode {} not implemented", raw.as_string())
             }
         }
     }
