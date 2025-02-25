@@ -53,6 +53,11 @@ enum Opcode {
     IndexRegistry { n0: u8, n1: u8, n2: u8 },
     AddRegistry { x: u8, n0: u8, n1: u8 },
 
+    SaveToMemory { x: u8 },
+    LoadFromMemory { x: u8 },
+    AddIToVX { x: u8 },
+    SaveDigits { x: u8 },
+
     SkipIfEqualXN { x: u8, n0: u8, n1: u8 },
     SkipIfNotEqualXN { x: u8, n0: u8, n1: u8 },
     SkipIfEqualXY { x: u8, y: u8 },
@@ -88,8 +93,9 @@ impl RawOpCode {
 
 struct Chip8 {
     data: [u8; 4096],
-    v: [u8; 16],
-    stack: [u8; 8],
+    registry: [u8; 16],
+    stack: [usize; 8],
+    memory: [u8; 512],
     sub_pointer: usize,
     i: u16,
     start: usize,
@@ -102,8 +108,9 @@ impl Chip8 {
     fn new() -> Chip8 {
         Chip8 {
             data: [0; 4096],
-            v: [0; 16],
+            registry: [0; 16],
             stack: [0; 8],
+            memory: [0; 512],
             sub_pointer: 0,
             i: 0,
             start: 512,
@@ -138,94 +145,108 @@ impl Chip8 {
         match c0 {
             0x0 => match c3 {
                 0x0 => Opcode::Clear, // 00E0
-                _ => Opcode::Return,  // 00EE
+
+                0xE => Opcode::Return, // 00EE
+
+                _ => Opcode::None { raw: raw_opcode },
             },
 
             0x6 => Opcode::NormalRegistry {
                 x: c1,
                 n0: c2,
                 n1: c3,
-            }, // 6XNN
+            }, // 6xnn
 
             0xA => Opcode::IndexRegistry {
                 n0: c1,
                 n1: c2,
                 n2: c3,
-            }, // ANNN
+            }, // Annn
 
             0x7 => Opcode::AddRegistry {
                 x: c1,
                 n0: c2,
                 n1: c3,
-            }, // 7XNN
+            }, // 7xnn
+
+            0xF => match c2 {
+                0x5 => Opcode::SaveToMemory { x: c1 }, // Fx55
+
+                0x6 => Opcode::LoadFromMemory { x: c1 }, // Fx65
+
+                0x1 => Opcode::AddIToVX { x: c1 }, // Fx1E
+
+                0x3 => Opcode::SaveDigits { x: c1 }, // Fx33
+
+                _ => Opcode::None { raw: raw_opcode },
+            },
 
             0x3 => Opcode::SkipIfEqualXN {
                 x: c1,
                 n0: c2,
                 n1: c3,
-            }, // 3XNN
+            }, // 3Xnn
 
             0x4 => Opcode::SkipIfNotEqualXN {
                 x: c1,
                 n0: c2,
                 n1: c3,
-            }, // 4XNN
+            }, // 4Xnn
 
-            0x5 => Opcode::SkipIfEqualXY { x: c1, y: c2 }, // 5XY0
+            0x5 => Opcode::SkipIfEqualXY { x: c1, y: c2 }, // 5xy0
 
-            0x9 => Opcode::SkipIfNotEqualXY { x: c1, y: c2 }, // 9XY0
+            0x9 => Opcode::SkipIfNotEqualXY { x: c1, y: c2 }, // 9xy0
 
             0x1 => Opcode::Jump {
                 n0: c1,
                 n1: c2,
                 n2: c3,
-            }, // 1NNN
+            }, // 1nnn
 
             0x2 => Opcode::Subroutine {
                 n0: c1,
                 n1: c2,
                 n2: c3,
-            }, // 2NNN
+            }, // 2nnn
 
             0x8 => match c3 {
-                0x0 => Opcode::Set { x: c1, y: c2 }, // 8XY0
+                0x0 => Opcode::Set { x: c1, y: c2 }, // 8xy0
 
-                0x1 => Opcode::Or { x: c1, y: c2 }, // 8XY1
+                0x1 => Opcode::Or { x: c1, y: c2 }, // 8xy1
 
-                0x2 => Opcode::And { x: c1, y: c2 }, // 8XY2
+                0x2 => Opcode::And { x: c1, y: c2 }, // 8xy2
 
-                0x3 => Opcode::Xor { x: c1, y: c2 }, // 8XY3
+                0x3 => Opcode::Xor { x: c1, y: c2 }, // 8xy3
 
-                0x4 => Opcode::Increment { x: c1, y: c2 }, // 8XY4
+                0x4 => Opcode::Increment { x: c1, y: c2 }, // 8xy4
 
-                0x5 => Opcode::Decrement { x: c1, y: c2 }, // 8XY5
+                0x5 => Opcode::Decrement { x: c1, y: c2 }, // 8xy5
 
-                0x7 => Opcode::DecrementRev { x: c1, y: c2 }, // 8XY7
+                0x7 => Opcode::DecrementRev { x: c1, y: c2 }, // 8xy7
 
-                0x6 => Opcode::ShiftRight { x: c1, y: c2 }, // 8XY6
+                0x6 => Opcode::ShiftRight { x: c1, y: c2 }, // 8xy6
 
-                _ => Opcode::ShiftLeft { x: c1, y: c2 }, // 8XYE
+                0xE => Opcode::ShiftLeft { x: c1, y: c2 }, // 8xyE
+
+                _ => Opcode::None { raw: raw_opcode },
             },
 
             0xD => Opcode::Draw {
                 x: c1,
                 y: c2,
                 n: c3,
-            }, // DXYN
+            }, // DxyN
 
             _ => Opcode::None { raw: raw_opcode },
         }
     }
 
     fn to_decimal(n0: u8, n1: u8, n2: u8) -> u16 {
-        let u0 = n0 as u16;
-        let u1 = n1 as u16;
-        let u2 = n2 as u16;
-        u0 * 256 + u1 * 16 + u2
+        n0 as u16 * 256 + n1 as u16 * 16 + n2 as u16
     }
 
     fn set_normal_registry(&mut self, x: u8, n0: u8, n1: u8) {
-        self.v[x as usize] = Chip8::to_decimal(0, n0, n1) as u8;
+        self.registry[x as usize] = Chip8::to_decimal(0, n0, n1) as u8;
     }
 
     fn set_index_registry(&mut self, n0: u8, n1: u8, n2: u8) {
@@ -233,17 +254,52 @@ impl Chip8 {
     }
 
     fn add_registry(&mut self, x: u8, n0: u8, n1: u8) {
-        self.v[x as usize] += Chip8::to_decimal(0, n0, n1) as u8;
+        let result =
+            (self.registry[x as usize] as u16 + Chip8::to_decimal(0, n0, n1) as u16) & 0xFF;
+        self.registry[x as usize] = result as u8;
     }
 
-    fn skip_if_equal(&mut self, x: u8, n0: u8, n1: u8) {
-        if self.v[x as usize] == self.v[Chip8::to_decimal(0, n0, n1) as usize] {
+    fn save_to_memory(&mut self, x: u8) {
+        let ci = self.i as usize & 0x200;
+        self.memory[ci..ci + x as usize].copy_from_slice(&self.registry[0..x as usize]);
+    }
+
+    fn load_from_memory(&mut self, x: u8) {
+        let ci = self.i as usize & 0x200;
+        self.registry[0..x as usize].copy_from_slice(&self.memory[ci..ci + x as usize]);
+    }
+
+    fn add_i_to_vx(&mut self, x: u8) {
+        self.i += self.registry[x as usize] as u16;
+    }
+
+    fn save_digits(&mut self, x: u8) {
+        let ci = self.i as usize & 0x200;
+        self.memory[ci as usize] = self.registry[x as usize] % 10;
+        self.memory[ci as usize + 1] = (self.registry[x as usize] / 10) % 10;
+        self.memory[ci as usize + 2] = self.registry[x as usize] / 100;
+    }
+
+    fn skip_if_equal_xn(&mut self, x: u8, n0: u8, n1: u8) {
+        if self.registry[x as usize] == Chip8::to_decimal(0, n0, n1) as u8 {
             self.step_counter();
         }
     }
 
-    fn skip_if_not_equal(&mut self, x: u8, n0: u8, n1: u8) {
-        if self.v[x as usize] != self.v[Chip8::to_decimal(0, n0, n1) as usize] {
+    fn skip_if_equal_xy(&mut self, x: u8, y: u8) {
+        if self.registry[x as usize] == self.registry[y as usize] {
+            self.step_counter();
+        }
+    }
+
+    fn skip_if_not_equal_xn(&mut self, x: u8, n0: u8, n1: u8) {
+        if self.registry[x as usize] != Chip8::to_decimal(0, n0, n1) as u8 {
+            self.step_counter();
+        }
+    }
+
+    fn skip_if_not_equal_xy(&mut self, x: u8, y: u8) {
+        if self.registry[x as usize] != self.registry[y as usize] {
             self.step_counter();
         }
     }
@@ -253,58 +309,61 @@ impl Chip8 {
     }
 
     fn subroutine(&mut self, n0: u8, n1: u8, n2: u8) {
-        self.jump(n0, n1, n2);
-        self.stack[self.sub_pointer] = self.program_counter as u8;
+        self.stack[self.sub_pointer] = self.program_counter;
         self.sub_pointer += 1;
+        self.jump(n0, n1, n2);
     }
 
-    fn return_sub(&mut self) {
-        self.program_counter = self.stack[self.sub_pointer - 1] as usize;
+    fn return_subroutine(&mut self) {
+        self.program_counter = self.stack[self.sub_pointer - 1];
         self.stack[self.sub_pointer - 1] = 0;
         self.sub_pointer -= 1;
     }
 
     fn set(&mut self, x: u8, y: u8) {
-        self.v[x as usize] = self.v[y as usize];
+        self.registry[x as usize] = self.registry[y as usize];
     }
 
     fn or(&mut self, x: u8, y: u8) {
-        self.v[x as usize] |= self.v[y as usize];
+        self.registry[x as usize] |= self.registry[y as usize];
     }
 
     fn and(&mut self, x: u8, y: u8) {
-        self.v[x as usize] &= self.v[y as usize];
+        self.registry[x as usize] &= self.registry[y as usize];
     }
 
     fn xor(&mut self, x: u8, y: u8) {
-        self.v[x as usize] ^= self.v[y as usize];
+        self.registry[x as usize] ^= self.registry[y as usize];
     }
 
     fn increment(&mut self, x: u8, y: u8) {
-        self.v[x as usize] += self.v[y as usize];
+        let n = (self.registry[x as usize] as u16 + self.registry[y as usize] as u16) & 0xFF;
+        self.registry[x as usize] = n as u8;
     }
 
     fn decrement(&mut self, x: u8, y: u8) {
-        self.v[x as usize] -= self.v[y as usize];
+        let n = (self.registry[x as usize] as i16 - self.registry[y as usize] as i16) & 0xFF;
+        self.registry[x as usize] = n as u8;
     }
 
     fn decrement_rev(&mut self, x: u8, y: u8) {
-        self.v[y as usize] -= self.v[x as usize];
+        let n = (self.registry[y as usize] as i16 - self.registry[x as usize] as i16) & 0xFF;
+        self.registry[y as usize] = n as u8;
     }
 
     fn shift_left(&mut self, x: u8, y: u8) {
-        self.v[15] = (self.v[x as usize] & 0b10000000) >> 7;
-        self.v[x as usize] = self.v[y as usize] << 1;
+        self.registry[15] = (self.registry[x as usize] & 0b10000000) >> 7;
+        self.registry[x as usize] = self.registry[y as usize] << 1;
     }
 
     fn shift_right(&mut self, x: u8, y: u8) {
-        self.v[15] = self.v[x as usize] & 0b1;
-        self.v[x as usize] = self.v[y as usize] >> 1;
+        self.registry[15] = self.registry[x as usize] & 0b1;
+        self.registry[x as usize] = self.registry[y as usize] >> 1;
     }
 
     fn draw(&mut self, x: u8, y: u8, n: u8) {
-        let px = self.v[x as usize];
-        let py = self.v[y as usize];
+        let px = self.registry[x as usize];
+        let py = self.registry[y as usize];
 
         for oy in 0..n {
             let idx = oy as usize + self.i as usize;
@@ -336,7 +395,8 @@ impl Chip8 {
                 self.step_counter();
             }
             Opcode::Return => {
-                self.return_sub();
+                self.return_subroutine();
+                self.step_counter();
             }
             Opcode::NormalRegistry { x, n0, n1 } => {
                 self.set_normal_registry(x, n0, n1);
@@ -350,20 +410,36 @@ impl Chip8 {
                 self.add_registry(x, n0, n1);
                 self.step_counter();
             }
+            Opcode::SaveToMemory { x } => {
+                self.save_to_memory(x);
+                self.step_counter();
+            }
+            Opcode::LoadFromMemory { x } => {
+                self.load_from_memory(x);
+                self.step_counter();
+            }
+            Opcode::AddIToVX { x } => {
+                self.add_i_to_vx(x);
+                self.step_counter();
+            }
+            Opcode::SaveDigits { x } => {
+                self.save_digits(x);
+                self.step_counter();
+            }
             Opcode::SkipIfEqualXN { x, n0, n1 } => {
-                self.skip_if_equal(x, n0, n1);
+                self.skip_if_equal_xn(x, n0, n1);
                 self.step_counter();
             }
             Opcode::SkipIfNotEqualXN { x, n0, n1 } => {
-                self.skip_if_not_equal(x, n0, n1);
+                self.skip_if_not_equal_xn(x, n0, n1);
                 self.step_counter();
             }
             Opcode::SkipIfEqualXY { x, y } => {
-                self.skip_if_equal(x, 0, y);
+                self.skip_if_equal_xy(x, y);
                 self.step_counter();
             }
             Opcode::SkipIfNotEqualXY { x, y } => {
-                self.skip_if_not_equal(x, 0, y);
+                self.skip_if_not_equal_xy(x, y);
                 self.step_counter();
             }
             Opcode::Jump { n0, n1, n2 } => {
