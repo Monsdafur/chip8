@@ -55,7 +55,7 @@ enum Opcode {
 
     SaveToMemory { x: u8 },
     LoadFromMemory { x: u8 },
-    AddIToVX { x: u8 },
+    AddVxToI { x: u8 },
     SaveDigits { x: u8 },
 
     SkipIfEqualXN { x: u8, n0: u8, n1: u8 },
@@ -92,12 +92,11 @@ impl RawOpCode {
 }
 
 struct Chip8 {
-    data: [u8; 4096],
+    memory: [u8; 4096],
     registry: [u8; 16],
     stack: [usize; 8],
-    memory: [u8; 512],
     sub_pointer: usize,
-    i: u16,
+    i: usize,
     start: usize,
     end: usize,
     program_counter: usize,
@@ -107,10 +106,9 @@ struct Chip8 {
 impl Chip8 {
     fn new() -> Chip8 {
         Chip8 {
-            data: [0; 4096],
+            memory: [0; 4096],
             registry: [0; 16],
             stack: [0; 8],
-            memory: [0; 512],
             sub_pointer: 0,
             i: 0,
             start: 512,
@@ -126,13 +124,13 @@ impl Chip8 {
 
         file.read_to_end(&mut data).unwrap();
         self.end = self.start + data.len();
-        self.data[self.start..self.end].copy_from_slice(&data[..]);
+        self.memory[self.start..self.end].copy_from_slice(&data[..]);
     }
 
     fn fetch(&self) -> RawOpCode {
         RawOpCode {
-            v0: self.data[self.program_counter],
-            v1: self.data[self.program_counter + 1],
+            v0: self.memory[self.program_counter],
+            v1: self.memory[self.program_counter + 1],
         }
     }
 
@@ -174,7 +172,7 @@ impl Chip8 {
 
                 0x6 => Opcode::LoadFromMemory { x: c1 }, // Fx65
 
-                0x1 => Opcode::AddIToVX { x: c1 }, // Fx1E
+                0x1 => Opcode::AddVxToI { x: c1 }, // Fx1E
 
                 0x3 => Opcode::SaveDigits { x: c1 }, // Fx33
 
@@ -250,7 +248,7 @@ impl Chip8 {
     }
 
     fn set_index_registry(&mut self, n0: u8, n1: u8, n2: u8) {
-        self.i = Chip8::to_decimal(n0, n1, n2);
+        self.i = Chip8::to_decimal(n0, n1, n2) as usize;
     }
 
     fn add_registry(&mut self, x: u8, n0: u8, n1: u8) {
@@ -260,24 +258,30 @@ impl Chip8 {
     }
 
     fn save_to_memory(&mut self, x: u8) {
-        let ci = self.i as usize & 0x200;
-        self.memory[ci..ci + x as usize].copy_from_slice(&self.registry[0..x as usize]);
+        let d = x as usize + 1;
+        let s = self.i & 0xFFF;
+        let e = (self.i + d) & 0xFFF;
+        self.memory[s..e].copy_from_slice(&self.registry[0..d]);
+        self.i += d;
     }
 
     fn load_from_memory(&mut self, x: u8) {
-        let ci = self.i as usize & 0x200;
-        self.registry[0..x as usize].copy_from_slice(&self.memory[ci..ci + x as usize]);
+        let d = x as usize + 1;
+        let s = self.i & 0xFFF;
+        let e = (self.i + d) & 0xFFF;
+        self.registry[0..d].copy_from_slice(&self.memory[s..e]);
+        self.i += d;
     }
 
-    fn add_i_to_vx(&mut self, x: u8) {
-        self.i += self.registry[x as usize] as u16;
+    fn add_vx_to_i(&mut self, x: u8) {
+        self.i += self.registry[x as usize] as usize;
     }
 
     fn save_digits(&mut self, x: u8) {
-        let ci = self.i as usize & 0x200;
-        self.memory[ci as usize] = self.registry[x as usize] % 10;
-        self.memory[ci as usize + 1] = (self.registry[x as usize] / 10) % 10;
-        self.memory[ci as usize + 2] = self.registry[x as usize] / 100;
+        let ci = self.i & 0xFFF;
+        self.memory[ci] = self.registry[x as usize] / 100;
+        self.memory[ci + 1] = (self.registry[x as usize] / 10) % 10;
+        self.memory[ci + 2] = self.registry[x as usize] % 10;
     }
 
     fn skip_if_equal_xn(&mut self, x: u8, n0: u8, n1: u8) {
@@ -337,28 +341,34 @@ impl Chip8 {
     }
 
     fn increment(&mut self, x: u8, y: u8) {
-        let n = (self.registry[x as usize] as u16 + self.registry[y as usize] as u16) & 0xFF;
+        let mut n = self.registry[x as usize] as u16 + self.registry[y as usize] as u16;
+        self.registry[15] = (n > 255) as u8;
+        n &= 0xFF;
         self.registry[x as usize] = n as u8;
     }
 
     fn decrement(&mut self, x: u8, y: u8) {
-        let n = (self.registry[x as usize] as i16 - self.registry[y as usize] as i16) & 0xFF;
+        let mut n = self.registry[x as usize] as i16 - self.registry[y as usize] as i16;
+        self.registry[15] = (n < 0) as u8;
+        n &= 0xFF;
         self.registry[x as usize] = n as u8;
     }
 
     fn decrement_rev(&mut self, x: u8, y: u8) {
-        let n = (self.registry[y as usize] as i16 - self.registry[x as usize] as i16) & 0xFF;
-        self.registry[y as usize] = n as u8;
+        let mut n = self.registry[y as usize] as i16 - self.registry[x as usize] as i16;
+        self.registry[15] = (n < 0) as u8;
+        n &= 0xFF;
+        self.registry[x as usize] = n as u8;
     }
 
     fn shift_left(&mut self, x: u8, y: u8) {
         self.registry[15] = (self.registry[x as usize] & 0b10000000) >> 7;
-        self.registry[x as usize] = self.registry[y as usize] << 1;
+        self.registry[x as usize] = (self.registry[y as usize] << 1) & 0xFF;
     }
 
     fn shift_right(&mut self, x: u8, y: u8) {
-        self.registry[15] = self.registry[x as usize] & 0b1;
-        self.registry[x as usize] = self.registry[y as usize] >> 1;
+        self.registry[15] = self.registry[x as usize] & 0b00000001;
+        self.registry[x as usize] = (self.registry[y as usize] >> 1) & 0xFF;
     }
 
     fn draw(&mut self, x: u8, y: u8, n: u8) {
@@ -366,8 +376,8 @@ impl Chip8 {
         let py = self.registry[y as usize];
 
         for oy in 0..n {
-            let idx = oy as usize + self.i as usize;
-            let mut bit_row = self.data[idx];
+            let idx = oy as usize + self.i;
+            let mut bit_row = self.memory[idx];
             for ox in (0..8).rev() {
                 let bit = bit_row & 0b1;
                 bit_row >>= 1;
@@ -418,8 +428,8 @@ impl Chip8 {
                 self.load_from_memory(x);
                 self.step_counter();
             }
-            Opcode::AddIToVX { x } => {
-                self.add_i_to_vx(x);
+            Opcode::AddVxToI { x } => {
+                self.add_vx_to_i(x);
                 self.step_counter();
             }
             Opcode::SaveDigits { x } => {
