@@ -341,34 +341,33 @@ impl Chip8 {
     }
 
     fn increment(&mut self, x: u8, y: u8) {
-        let mut n = self.registry[x as usize] as u16 + self.registry[y as usize] as u16;
+        let n = self.registry[x as usize] as u16 + self.registry[y as usize] as u16;
+        self.registry[x as usize] = (n & 0xFF) as u8;
         self.registry[15] = (n > 255) as u8;
-        n &= 0xFF;
-        self.registry[x as usize] = n as u8;
     }
 
     fn decrement(&mut self, x: u8, y: u8) {
-        let mut n = self.registry[x as usize] as i16 - self.registry[y as usize] as i16;
-        self.registry[15] = (n < 0) as u8;
-        n &= 0xFF;
-        self.registry[x as usize] = n as u8;
+        let n = self.registry[x as usize] as i16 - self.registry[y as usize] as i16;
+        self.registry[x as usize] = (n & 0xFF) as u8;
+        self.registry[15] = (n >= 0) as u8;
     }
 
     fn decrement_rev(&mut self, x: u8, y: u8) {
-        let mut n = self.registry[y as usize] as i16 - self.registry[x as usize] as i16;
-        self.registry[15] = (n < 0) as u8;
-        n &= 0xFF;
-        self.registry[x as usize] = n as u8;
+        let n = self.registry[y as usize] as i16 - self.registry[x as usize] as i16;
+        self.registry[x as usize] = (n & 0xFF) as u8;
+        self.registry[15] = (n >= 0) as u8;
     }
 
     fn shift_left(&mut self, x: u8, y: u8) {
-        self.registry[15] = (self.registry[x as usize] & 0b10000000) >> 7;
-        self.registry[x as usize] = (self.registry[y as usize] << 1) & 0xFF;
+        let r = self.registry[y as usize];
+        self.registry[x as usize] = (r << 1) & 0xFF;
+        self.registry[15] = (r & 0b10000000) >> 7;
     }
 
     fn shift_right(&mut self, x: u8, y: u8) {
-        self.registry[15] = self.registry[x as usize] & 0b00000001;
-        self.registry[x as usize] = (self.registry[y as usize] >> 1) & 0xFF;
+        let r = self.registry[y as usize];
+        self.registry[x as usize] = (r >> 1) & 0xFF;
+        self.registry[15] = r & 0b00000001;
     }
 
     fn draw(&mut self, x: u8, y: u8, n: u8) {
