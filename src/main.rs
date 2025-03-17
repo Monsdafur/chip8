@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::io::Read;
-use std::time::Duration;
+use std::time::Instant;
 use std::{fs, path::PathBuf};
 
 use sdl3::{
@@ -15,28 +15,38 @@ fn main() {
     let sdl_context = sdl3::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
-    let window = video_subsystem.window("chip8", 1280, 640).build().unwrap();
+    let window = video_subsystem.window("chip8", 960, 480).build().unwrap();
 
     let mut canvas = window.into_canvas();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    canvas.set_scale(20.0, 20.0).unwrap();
+    canvas.set_scale(15.0, 15.0).unwrap();
+
+    let instant = Instant::now();
+    let mut time;
+    let mut last_frame_time = 0.0f32;
+    let frame_rate_inv = 1.0f32 / 60.0f32;
 
     'running: loop {
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => {
+                Event::Quit { .. } => {
                     break 'running;
                 }
                 _ => {}
             }
+
+            chip8.input_handle(&event);
         }
-        chip8.execute();
+
+        time = instant.elapsed().as_secs_f32();
+        let allow_display = (time - last_frame_time) > frame_rate_inv;
+
+        chip8.execute(allow_display);
         chip8.display(&mut canvas);
-        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+
+        if allow_display {
+            last_frame_time = time;
+        }
     }
 }
 
@@ -58,22 +68,30 @@ enum Opcode {
     AddVxToI { x: u8 },
     SaveDigits { x: u8 },
 
+    SetTimer { x: u8 },
+    SaveTimer { x: u8 },
+
     SkipIfEqualXN { x: u8, n0: u8, n1: u8 },
     SkipIfNotEqualXN { x: u8, n0: u8, n1: u8 },
     SkipIfEqualXY { x: u8, y: u8 },
     SkipIfNotEqualXY { x: u8, y: u8 },
     Jump { n0: u8, n1: u8, n2: u8 },
+    JumpOffset { n0: u8, n1: u8, n2: u8 },
     Subroutine { n0: u8, n1: u8, n2: u8 },
 
     Set { x: u8, y: u8 },
     Or { x: u8, y: u8 },
     And { x: u8, y: u8 },
     Xor { x: u8, y: u8 },
-    Increment { x: u8, y: u8 },
-    Decrement { x: u8, y: u8 },
-    DecrementRev { x: u8, y: u8 },
+    Add { x: u8, y: u8 },
+    Subtract { x: u8, y: u8 },
+    SubtractRev { x: u8, y: u8 },
     ShiftLeft { x: u8, y: u8 },
     ShiftRight { x: u8, y: u8 },
+
+    SkipIfKeyDown { x: u8 },
+    SkipIfKeyUp { x: u8 },
+    WaitKeyDown { x: u8 },
 
     Draw { x: u8, y: u8, n: u8 },
 
@@ -95,12 +113,15 @@ struct Chip8 {
     memory: [u8; 4096],
     registry: [u8; 16],
     stack: [usize; 8],
+    key: [bool; 16],
     sub_pointer: usize,
     i: usize,
     start: usize,
     end: usize,
     program_counter: usize,
     pixels: Vec<Point>,
+    pixel_map: [[u8; 32]; 64],
+    timer: u8,
 }
 
 impl Chip8 {
@@ -109,12 +130,15 @@ impl Chip8 {
             memory: [0; 4096],
             registry: [0; 16],
             stack: [0; 8],
+            key: [false; 16],
             sub_pointer: 0,
             i: 0,
             start: 512,
             end: 512,
             program_counter: 512,
             pixels: Vec::new(),
+            pixel_map: [[0; 32]; 64],
+            timer: 0,
         }
     }
 
@@ -135,10 +159,11 @@ impl Chip8 {
     }
 
     fn decode(raw_opcode: RawOpCode) -> Opcode {
-        let c0 = raw_opcode.v0 >> 4;
-        let c1 = raw_opcode.v0 & 0b1111;
-        let c2 = raw_opcode.v1 >> 4;
-        let c3 = raw_opcode.v1 & 0b1111;
+        let hex = ((raw_opcode.v0 as i32) << 8) | raw_opcode.v1 as i32;
+        let c0 = ((hex & 0xF000) >> 12) as u8;
+        let c1 = ((hex & 0x0F00) >> 8) as u8;
+        let c2 = ((hex & 0x00F0) >> 4) as u8;
+        let c3 = (hex & 0x000F) as u8;
 
         match c0 {
             0x0 => match c3 {
@@ -167,14 +192,20 @@ impl Chip8 {
                 n1: c3,
             }, // 7xnn
 
-            0xF => match c2 {
-                0x5 => Opcode::SaveToMemory { x: c1 }, // Fx55
+            0xF => match raw_opcode.v1 {
+                0x55 => Opcode::SaveToMemory { x: c1 }, // Fx55
 
-                0x6 => Opcode::LoadFromMemory { x: c1 }, // Fx65
+                0x65 => Opcode::LoadFromMemory { x: c1 }, // Fx65
 
-                0x1 => Opcode::AddVxToI { x: c1 }, // Fx1E
+                0x1E => Opcode::AddVxToI { x: c1 }, // Fx1E
 
-                0x3 => Opcode::SaveDigits { x: c1 }, // Fx33
+                0x33 => Opcode::SaveDigits { x: c1 }, // Fx33
+
+                0x15 => Opcode::SetTimer { x: c1 }, // Fx15
+
+                0x07 => Opcode::SaveTimer { x: c1 }, // Fx07
+
+                0x0A => Opcode::WaitKeyDown { x: c1 }, // Fx0A
 
                 _ => Opcode::None { raw: raw_opcode },
             },
@@ -201,6 +232,12 @@ impl Chip8 {
                 n2: c3,
             }, // 1nnn
 
+            0xB => Opcode::JumpOffset {
+                n0: c1,
+                n1: c2,
+                n2: c3,
+            }, // Bnnn
+
             0x2 => Opcode::Subroutine {
                 n0: c1,
                 n1: c2,
@@ -216,15 +253,22 @@ impl Chip8 {
 
                 0x3 => Opcode::Xor { x: c1, y: c2 }, // 8xy3
 
-                0x4 => Opcode::Increment { x: c1, y: c2 }, // 8xy4
+                0x4 => Opcode::Add { x: c1, y: c2 }, // 8xy4
 
-                0x5 => Opcode::Decrement { x: c1, y: c2 }, // 8xy5
+                0x5 => Opcode::Subtract { x: c1, y: c2 }, // 8xy5
 
-                0x7 => Opcode::DecrementRev { x: c1, y: c2 }, // 8xy7
+                0x7 => Opcode::SubtractRev { x: c1, y: c2 }, // 8xy7
 
                 0x6 => Opcode::ShiftRight { x: c1, y: c2 }, // 8xy6
 
                 0xE => Opcode::ShiftLeft { x: c1, y: c2 }, // 8xyE
+
+                _ => Opcode::None { raw: raw_opcode },
+            },
+            0xE => match raw_opcode.v1 {
+                0x9E => Opcode::SkipIfKeyDown { x: c1 }, // Ex9E
+
+                0xA1 => Opcode::SkipIfKeyUp { x: c1 }, // ExA1
 
                 _ => Opcode::None { raw: raw_opcode },
             },
@@ -277,6 +321,14 @@ impl Chip8 {
         self.i += self.registry[x as usize] as usize;
     }
 
+    fn set_timer(&mut self, x: u8) {
+        self.timer = self.registry[x as usize];
+    }
+
+    fn save_timer(&mut self, x: u8) {
+        self.registry[x as usize] = self.timer;
+    }
+
     fn save_digits(&mut self, x: u8) {
         let ci = self.i & 0xFFF;
         self.memory[ci] = self.registry[x as usize] / 100;
@@ -312,6 +364,10 @@ impl Chip8 {
         self.program_counter = Chip8::to_decimal(n0, n1, n2) as usize;
     }
 
+    fn jump_offset(&mut self, n0: u8, n1: u8, n2: u8) {
+        self.program_counter = (Chip8::to_decimal(n0, n1, n2) + self.registry[0] as u16) as usize;
+    }
+
     fn subroutine(&mut self, n0: u8, n1: u8, n2: u8) {
         self.stack[self.sub_pointer] = self.program_counter;
         self.sub_pointer += 1;
@@ -330,29 +386,32 @@ impl Chip8 {
 
     fn or(&mut self, x: u8, y: u8) {
         self.registry[x as usize] |= self.registry[y as usize];
+        self.registry[15] = 0;
     }
 
     fn and(&mut self, x: u8, y: u8) {
         self.registry[x as usize] &= self.registry[y as usize];
+        self.registry[15] = 0;
     }
 
     fn xor(&mut self, x: u8, y: u8) {
         self.registry[x as usize] ^= self.registry[y as usize];
+        self.registry[15] = 0;
     }
 
-    fn increment(&mut self, x: u8, y: u8) {
+    fn add(&mut self, x: u8, y: u8) {
         let n = self.registry[x as usize] as u16 + self.registry[y as usize] as u16;
         self.registry[x as usize] = (n & 0xFF) as u8;
         self.registry[15] = (n > 255) as u8;
     }
 
-    fn decrement(&mut self, x: u8, y: u8) {
+    fn subtract(&mut self, x: u8, y: u8) {
         let n = self.registry[x as usize] as i16 - self.registry[y as usize] as i16;
         self.registry[x as usize] = (n & 0xFF) as u8;
         self.registry[15] = (n >= 0) as u8;
     }
 
-    fn decrement_rev(&mut self, x: u8, y: u8) {
+    fn subtract_rev(&mut self, x: u8, y: u8) {
         let n = self.registry[y as usize] as i16 - self.registry[x as usize] as i16;
         self.registry[x as usize] = (n & 0xFF) as u8;
         self.registry[15] = (n >= 0) as u8;
@@ -370,38 +429,68 @@ impl Chip8 {
         self.registry[15] = r & 0b00000001;
     }
 
+    fn skip_if_keydown(&mut self, x: u8) {
+        if self.key[self.registry[x as usize] as usize] == true {
+            self.step_counter();
+        }
+    }
+
+    fn skip_if_keyup(&mut self, x: u8) {
+        if self.key[self.registry[x as usize] as usize] == false {
+            self.step_counter();
+        }
+    }
+
+    fn wait_keydown(&mut self, x: u8) {
+        for i in 0..16 {
+            if self.key[i] {
+                self.registry[x as usize] = i as u8;
+                self.step_counter();
+                break;
+            }
+        }
+    }
+
     fn draw(&mut self, x: u8, y: u8, n: u8) {
-        let px = self.registry[x as usize];
-        let py = self.registry[y as usize];
+        let px = self.registry[x as usize] % 64;
+        let py = self.registry[y as usize] % 32;
 
         for oy in 0..n {
             let idx = oy as usize + self.i;
             let mut bit_row = self.memory[idx];
             for ox in (0..8).rev() {
-                let bit = bit_row & 0b1;
+                let pixel = bit_row & 0b1;
                 bit_row >>= 1;
-                if bit > 0 {
-                    self.draw_pixel(px + ox, py + oy);
+
+                let dx = (px + ox) as usize;
+                let dy = (py + oy) as usize;
+
+                if dx >= 64 || dy >= 32 {
+                    continue;
                 }
+
+                if pixel == 1 {
+                    self.registry[15] = self.pixel_map[dx][dy];
+                }
+
+                self.pixel_map[dx][dy] ^= pixel;
             }
         }
-    }
-
-    fn draw_pixel(&mut self, x: u8, y: u8) {
-        let pixel = Point::new(x as i32, y as i32);
-        self.pixels.push(pixel);
     }
 
     fn step_counter(&mut self) {
         self.program_counter += 2;
     }
 
-    fn execute(&mut self) {
+    fn execute(&mut self, allow_display: bool) {
         let opcode = Chip8::decode(self.fetch());
         match opcode {
             Opcode::Clear => {
-                self.pixels.clear();
-                self.step_counter();
+                if allow_display {
+                    self.pixels.clear();
+                    self.pixel_map = [[0; 32]; 64];
+                    self.step_counter();
+                }
             }
             Opcode::Return => {
                 self.return_subroutine();
@@ -431,6 +520,14 @@ impl Chip8 {
                 self.add_vx_to_i(x);
                 self.step_counter();
             }
+            Opcode::SetTimer { x } => {
+                self.set_timer(x);
+                self.step_counter();
+            }
+            Opcode::SaveTimer { x } => {
+                self.save_timer(x);
+                self.step_counter();
+            }
             Opcode::SaveDigits { x } => {
                 self.save_digits(x);
                 self.step_counter();
@@ -454,6 +551,9 @@ impl Chip8 {
             Opcode::Jump { n0, n1, n2 } => {
                 self.jump(n0, n1, n2);
             }
+            Opcode::JumpOffset { n0, n1, n2 } => {
+                self.jump_offset(n0, n1, n2);
+            }
             Opcode::Subroutine { n0, n1, n2 } => {
                 self.subroutine(n0, n1, n2);
             }
@@ -473,16 +573,16 @@ impl Chip8 {
                 self.xor(x, y);
                 self.step_counter();
             }
-            Opcode::Increment { x, y } => {
-                self.increment(x, y);
+            Opcode::Add { x, y } => {
+                self.add(x, y);
                 self.step_counter();
             }
-            Opcode::Decrement { x, y } => {
-                self.decrement(x, y);
+            Opcode::Subtract { x, y } => {
+                self.subtract(x, y);
                 self.step_counter();
             }
-            Opcode::DecrementRev { x, y } => {
-                self.decrement_rev(x, y);
+            Opcode::SubtractRev { x, y } => {
+                self.subtract_rev(x, y);
                 self.step_counter();
             }
             Opcode::ShiftRight { x, y } => {
@@ -493,23 +593,104 @@ impl Chip8 {
                 self.shift_left(x, y);
                 self.step_counter();
             }
-            Opcode::Draw { x, y, n } => {
-                self.draw(x, y, n);
+            Opcode::SkipIfKeyDown { x } => {
+                self.skip_if_keydown(x);
                 self.step_counter();
+            }
+            Opcode::SkipIfKeyUp { x } => {
+                self.skip_if_keyup(x);
+                self.step_counter();
+            }
+            Opcode::WaitKeyDown { x } => {
+                self.wait_keydown(x);
+            }
+            Opcode::Draw { x, y, n } => {
+                if allow_display {
+                    self.draw(x, y, n);
+                    self.step_counter();
+                }
             }
             Opcode::None { raw } => {
                 unimplemented!("opcode {} not implemented", raw.as_string())
             }
         }
+
+        if allow_display {
+            self.timer -= if self.timer > 0 { 1 } else { 0 };
+        }
+    }
+
+    fn input_handle(&mut self, event: &Event) {
+        match event {
+            Event::KeyDown { keycode, .. } => match keycode {
+                Some(Keycode::_1) => self.key[0x1] = true,
+                Some(Keycode::_2) => self.key[0x2] = true,
+                Some(Keycode::_3) => self.key[0x3] = true,
+                Some(Keycode::_4) => self.key[0xC] = true,
+
+                Some(Keycode::Q) => self.key[0x4] = true,
+                Some(Keycode::W) => self.key[0x5] = true,
+                Some(Keycode::E) => self.key[0x6] = true,
+                Some(Keycode::R) => self.key[0xD] = true,
+
+                Some(Keycode::A) => self.key[0x7] = true,
+                Some(Keycode::S) => self.key[0x8] = true,
+                Some(Keycode::D) => self.key[0x9] = true,
+                Some(Keycode::F) => self.key[0xE] = true,
+
+                Some(Keycode::Z) => self.key[0xA] = true,
+                Some(Keycode::X) => self.key[0x0] = true,
+                Some(Keycode::C) => self.key[0xB] = true,
+                Some(Keycode::V) => self.key[0xF] = true,
+
+                _ => {}
+            },
+
+            Event::KeyUp { keycode, .. } => match keycode {
+                Some(Keycode::_1) => self.key[0x1] = false,
+                Some(Keycode::_2) => self.key[0x2] = false,
+                Some(Keycode::_3) => self.key[0x3] = false,
+                Some(Keycode::_4) => self.key[0xC] = false,
+
+                Some(Keycode::Q) => self.key[0x4] = false,
+                Some(Keycode::W) => self.key[0x5] = false,
+                Some(Keycode::E) => self.key[0x6] = false,
+                Some(Keycode::R) => self.key[0xD] = false,
+
+                Some(Keycode::A) => self.key[0x7] = false,
+                Some(Keycode::S) => self.key[0x8] = false,
+                Some(Keycode::D) => self.key[0x9] = false,
+                Some(Keycode::F) => self.key[0xE] = false,
+
+                Some(Keycode::Z) => self.key[0xA] = false,
+                Some(Keycode::X) => self.key[0x0] = false,
+                Some(Keycode::C) => self.key[0xB] = false,
+                Some(Keycode::V) => self.key[0xF] = false,
+
+                _ => {}
+            },
+
+            _ => {}
+        }
     }
 
     fn display(&self, canvas: &mut Canvas<Window>) {
-        canvas.set_draw_color(Color::RGB(0, 25, 0));
+        canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
-        canvas.set_draw_color(Color::RGB(0, 175, 0));
-        for pixel in self.pixels.iter() {
-            canvas.draw_point(*pixel).unwrap();
+        canvas.set_draw_color(Color::RGB(0, 255, 0));
+
+        let mut pixel = Point::new(0, 0);
+
+        for x in 0..64usize {
+            for y in 0..32usize {
+                if self.pixel_map[x][y] == 1 {
+                    pixel.x = x as i32;
+                    pixel.y = y as i32;
+                    canvas.draw_point(pixel).unwrap();
+                }
+            }
         }
+
         canvas.present();
     }
 }
