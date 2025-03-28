@@ -1,4 +1,5 @@
 use clap::Parser;
+use rand::prelude::*;
 use std::io::Read;
 use std::time::Instant;
 use std::{fs, path::PathBuf};
@@ -42,10 +43,10 @@ fn main() {
         let allow_display = (time - last_frame_time) > frame_rate_inv;
 
         chip8.execute(allow_display);
-        chip8.display(&mut canvas);
 
         if allow_display {
             last_frame_time = time;
+            chip8.display(&mut canvas);
         }
     }
 }
@@ -59,6 +60,8 @@ enum Opcode {
     Clear,
     Return,
 
+    Random { x: u8, n0: u8, n1: u8 },
+
     NormalRegistry { x: u8, n0: u8, n1: u8 },
     IndexRegistry { n0: u8, n1: u8, n2: u8 },
     AddRegistry { x: u8, n0: u8, n1: u8 },
@@ -67,9 +70,11 @@ enum Opcode {
     LoadFromMemory { x: u8 },
     AddVxToI { x: u8 },
     SaveDigits { x: u8 },
+    SetSprite { x: u8 },
 
     SetTimer { x: u8 },
     SaveTimer { x: u8 },
+    SetSoundTimer { x: u8 },
 
     SkipIfEqualXN { x: u8, n0: u8, n1: u8 },
     SkipIfNotEqualXN { x: u8, n0: u8, n1: u8 },
@@ -119,9 +124,11 @@ struct Chip8 {
     start: usize,
     end: usize,
     program_counter: usize,
-    pixels: Vec<Point>,
     pixel_map: [[u8; 32]; 64],
-    timer: u8,
+    delay_timer: u8,
+    sound_timer: u8,
+    wait_key_down: bool,
+    rng: ThreadRng,
 }
 
 impl Chip8 {
@@ -136,9 +143,11 @@ impl Chip8 {
             start: 512,
             end: 512,
             program_counter: 512,
-            pixels: Vec::new(),
             pixel_map: [[0; 32]; 64],
-            timer: 0,
+            delay_timer: 0,
+            sound_timer: 0,
+            wait_key_down: false,
+            rng: rand::rng(),
         }
     }
 
@@ -149,6 +158,27 @@ impl Chip8 {
         file.read_to_end(&mut data).unwrap();
         self.end = self.start + data.len();
         self.memory[self.start..self.end].copy_from_slice(&data[..]);
+
+        let font = [
+            0xF0u8, 0x90u8, 0x90u8, 0x90u8, 0xF0u8, // 0
+            0x20u8, 0x60u8, 0x20u8, 0x20u8, 0x70u8, // 1
+            0xF0u8, 0x10u8, 0xF0u8, 0x80u8, 0xF0u8, // 2
+            0xF0u8, 0x10u8, 0xF0u8, 0x10u8, 0xF0u8, // 3
+            0x90u8, 0x90u8, 0xF0u8, 0x10u8, 0x10u8, // 4
+            0xF0u8, 0x80u8, 0xF0u8, 0x10u8, 0xF0u8, // 5
+            0xF0u8, 0x80u8, 0xF0u8, 0x90u8, 0xF0u8, // 6
+            0xF0u8, 0x10u8, 0x20u8, 0x40u8, 0x40u8, // 7
+            0xF0u8, 0x90u8, 0xF0u8, 0x90u8, 0xF0u8, // 8
+            0xF0u8, 0x90u8, 0xF0u8, 0x10u8, 0xF0u8, // 9
+            0xF0u8, 0x90u8, 0xF0u8, 0x90u8, 0x90u8, // A
+            0xE0u8, 0x90u8, 0xE0u8, 0x90u8, 0xE0u8, // B
+            0xF0u8, 0x80u8, 0x80u8, 0x80u8, 0xF0u8, // C
+            0xE0u8, 0x90u8, 0x90u8, 0x90u8, 0xE0u8, // D
+            0xF0u8, 0x80u8, 0xF0u8, 0x80u8, 0xF0u8, // E
+            0xF0u8, 0x80u8, 0xF0u8, 0x80u8, 0x80u8, // F
+        ];
+
+        self.memory[0x50..0xA0].copy_from_slice(&font[..]);
     }
 
     fn fetch(&self) -> RawOpCode {
@@ -172,6 +202,12 @@ impl Chip8 {
                 0xE => Opcode::Return, // 00EE
 
                 _ => Opcode::None { raw: raw_opcode },
+            },
+
+            0xC => Opcode::Random {
+                x: c1,
+                n0: c2,
+                n1: c3,
             },
 
             0x6 => Opcode::NormalRegistry {
@@ -201,9 +237,13 @@ impl Chip8 {
 
                 0x33 => Opcode::SaveDigits { x: c1 }, // Fx33
 
+                0x29 => Opcode::SetSprite { x: c1 }, // Fx29
+
                 0x15 => Opcode::SetTimer { x: c1 }, // Fx15
 
                 0x07 => Opcode::SaveTimer { x: c1 }, // Fx07
+
+                0x18 => Opcode::SetSoundTimer { x: c1 }, // Fx18
 
                 0x0A => Opcode::WaitKeyDown { x: c1 }, // Fx0A
 
@@ -317,16 +357,24 @@ impl Chip8 {
         self.i += d;
     }
 
+    fn set_sprite(&mut self, x: u8) {
+        self.i = 0x050 + self.registry[x as usize] as usize * 5;
+    }
+
     fn add_vx_to_i(&mut self, x: u8) {
         self.i += self.registry[x as usize] as usize;
     }
 
     fn set_timer(&mut self, x: u8) {
-        self.timer = self.registry[x as usize];
+        self.delay_timer = self.registry[x as usize];
     }
 
     fn save_timer(&mut self, x: u8) {
-        self.registry[x as usize] = self.timer;
+        self.registry[x as usize] = self.delay_timer;
+    }
+
+    fn set_sound_timer(&mut self, x: u8) {
+        self.sound_timer = self.registry[x as usize];
     }
 
     fn save_digits(&mut self, x: u8) {
@@ -375,9 +423,9 @@ impl Chip8 {
     }
 
     fn return_subroutine(&mut self) {
-        self.program_counter = self.stack[self.sub_pointer - 1];
-        self.stack[self.sub_pointer - 1] = 0;
         self.sub_pointer -= 1;
+        self.program_counter = self.stack[self.sub_pointer];
+        self.stack[self.sub_pointer] = 0;
     }
 
     fn set(&mut self, x: u8, y: u8) {
@@ -386,47 +434,47 @@ impl Chip8 {
 
     fn or(&mut self, x: u8, y: u8) {
         self.registry[x as usize] |= self.registry[y as usize];
-        self.registry[15] = 0;
+        self.registry[0xF] = 0;
     }
 
     fn and(&mut self, x: u8, y: u8) {
         self.registry[x as usize] &= self.registry[y as usize];
-        self.registry[15] = 0;
+        self.registry[0xF] = 0;
     }
 
     fn xor(&mut self, x: u8, y: u8) {
         self.registry[x as usize] ^= self.registry[y as usize];
-        self.registry[15] = 0;
+        self.registry[0xF] = 0;
     }
 
     fn add(&mut self, x: u8, y: u8) {
         let n = self.registry[x as usize] as u16 + self.registry[y as usize] as u16;
         self.registry[x as usize] = (n & 0xFF) as u8;
-        self.registry[15] = (n > 255) as u8;
+        self.registry[0xF] = (n > 255) as u8;
     }
 
     fn subtract(&mut self, x: u8, y: u8) {
         let n = self.registry[x as usize] as i16 - self.registry[y as usize] as i16;
         self.registry[x as usize] = (n & 0xFF) as u8;
-        self.registry[15] = (n >= 0) as u8;
+        self.registry[0xF] = (n >= 0) as u8;
     }
 
     fn subtract_rev(&mut self, x: u8, y: u8) {
         let n = self.registry[y as usize] as i16 - self.registry[x as usize] as i16;
         self.registry[x as usize] = (n & 0xFF) as u8;
-        self.registry[15] = (n >= 0) as u8;
+        self.registry[0xF] = (n >= 0) as u8;
     }
 
     fn shift_left(&mut self, x: u8, y: u8) {
         let r = self.registry[y as usize];
         self.registry[x as usize] = (r << 1) & 0xFF;
-        self.registry[15] = (r & 0b10000000) >> 7;
+        self.registry[0xF] = (r & 0b10000000) >> 7;
     }
 
     fn shift_right(&mut self, x: u8, y: u8) {
         let r = self.registry[y as usize];
         self.registry[x as usize] = (r >> 1) & 0xFF;
-        self.registry[15] = r & 0b00000001;
+        self.registry[0xF] = r & 0b00000001;
     }
 
     fn skip_if_keydown(&mut self, x: u8) {
@@ -443,17 +491,29 @@ impl Chip8 {
 
     fn wait_keydown(&mut self, x: u8) {
         for i in 0..16 {
-            if self.key[i] {
+            if self.key[i] && !self.wait_key_down {
+                self.wait_key_down = true;
+            }
+
+            if !self.key[i] && self.wait_key_down {
                 self.registry[x as usize] = i as u8;
                 self.step_counter();
+                self.wait_key_down = false;
                 break;
             }
         }
     }
 
+    fn random(&mut self, x: u8, n0: u8, n1: u8) {
+        self.registry[x as usize] =
+            self.rng.random_range(0u8..254u8) & Chip8::to_decimal(0, n0, n1) as u8;
+    }
+
     fn draw(&mut self, x: u8, y: u8, n: u8) {
-        let px = self.registry[x as usize] % 64;
-        let py = self.registry[y as usize] % 32;
+        let px = self.registry[x as usize];
+        let py = self.registry[y as usize];
+
+        self.registry[0xF] = 0;
 
         for oy in 0..n {
             let idx = oy as usize + self.i;
@@ -462,18 +522,15 @@ impl Chip8 {
                 let pixel = bit_row & 0b1;
                 bit_row >>= 1;
 
-                let dx = (px + ox) as usize;
-                let dy = (py + oy) as usize;
-
-                if dx >= 64 || dy >= 32 {
-                    continue;
-                }
+                let dx = (px + ox) as usize % 64;
+                let dy = (py + oy) as usize % 32;
 
                 if pixel == 1 {
-                    self.registry[15] = self.pixel_map[dx][dy];
+                    if self.pixel_map[dx][dy] == 1 {
+                        self.registry[0xF] = 1;
+                    }
+                    self.pixel_map[dx][dy] ^= 1;
                 }
-
-                self.pixel_map[dx][dy] ^= pixel;
             }
         }
     }
@@ -487,13 +544,16 @@ impl Chip8 {
         match opcode {
             Opcode::Clear => {
                 if allow_display {
-                    self.pixels.clear();
                     self.pixel_map = [[0; 32]; 64];
                     self.step_counter();
                 }
             }
             Opcode::Return => {
                 self.return_subroutine();
+                self.step_counter();
+            }
+            Opcode::Random { x, n0, n1 } => {
+                self.random(x, n0, n1);
                 self.step_counter();
             }
             Opcode::NormalRegistry { x, n0, n1 } => {
@@ -516,6 +576,10 @@ impl Chip8 {
                 self.load_from_memory(x);
                 self.step_counter();
             }
+            Opcode::SetSprite { x } => {
+                self.set_sprite(x);
+                self.step_counter();
+            }
             Opcode::AddVxToI { x } => {
                 self.add_vx_to_i(x);
                 self.step_counter();
@@ -526,6 +590,10 @@ impl Chip8 {
             }
             Opcode::SaveTimer { x } => {
                 self.save_timer(x);
+                self.step_counter();
+            }
+            Opcode::SetSoundTimer { x } => {
+                self.set_sound_timer(x);
                 self.step_counter();
             }
             Opcode::SaveDigits { x } => {
@@ -616,7 +684,8 @@ impl Chip8 {
         }
 
         if allow_display {
-            self.timer -= if self.timer > 0 { 1 } else { 0 };
+            self.delay_timer -= if self.delay_timer > 0 { 1 } else { 0 };
+            self.sound_timer -= if self.sound_timer > 0 { 1 } else { 0 };
         }
     }
 
@@ -675,9 +744,9 @@ impl Chip8 {
     }
 
     fn display(&self, canvas: &mut Canvas<Window>) {
-        canvas.set_draw_color(Color::RGB(0, 0, 0));
+        canvas.set_draw_color(Color::RGB(16, 16, 64));
         canvas.clear();
-        canvas.set_draw_color(Color::RGB(0, 255, 0));
+        canvas.set_draw_color(Color::RGB(224, 224, 128));
 
         let mut pixel = Point::new(0, 0);
 
